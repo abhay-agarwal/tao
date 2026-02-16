@@ -154,7 +154,13 @@ extern "C" fn application_will_continue_user_activity_with_type(
   user_activity_type: &NSString,
 ) -> Bool {
   trace!("Trigger `application:willContinueUserActivityWithType:`");
-  let result = unsafe { Bool::new(user_activity_type == NSUserActivityTypeBrowsingWeb) };
+  let CSSearchableItemActionType = NSString::from_str("com.apple.corespotlightitem");
+  let result = unsafe {
+    Bool::new(
+      user_activity_type == NSUserActivityTypeBrowsingWeb
+        || *user_activity_type == *CSSearchableItemActionType,
+    )
+  };
   trace!("Completed `application:willContinueUserActivityWithType:`");
   result
 }
@@ -167,6 +173,7 @@ extern "C" fn application_continue_user_activity(
   _restoration_handler: &block2::Block<dyn Fn(*mut NSError)>,
 ) -> Bool {
   trace!("Trigger `application:continueUserActivity:restorationHandler:`");
+
   let url = unsafe {
     if user_activity
       .activityType()
@@ -194,13 +201,38 @@ extern "C" fn application_continue_user_activity(
         },
       }
     } else {
-      return Bool::new(false);
+      // NOTE: This will catch ALL user activities that are not web browsing:
+      // com.apple.corespotlightitem -> navigating via spotlight
+      // as well as any custom activities created, such as handoff activities.
+      let Some(user_info) = user_activity.userInfo() else {
+        return Bool::new(false);
+      };
+      // userInfo is an NSDictionary; we look up the identifier key to pass to our url
+      let identifier_key =
+        user_info.objectForKey(&*NSString::from_str("kCSSearchableItemActivityIdentifier"));
+      let Some(identifier_nsstring) = identifier_key else {
+        return Bool::new(false);
+      };
+      let identifier_nsstring = identifier_nsstring
+        .downcast::<NSString>()
+        .expect("Failed to downcast userInfo dictionary value to NSString");
+      let identifier = &identifier_nsstring.to_string();
+
+      // We only support user info values that are also URLs or deep links
+      if let Ok(url) = url::Url::parse(identifier) {
+        url
+      } else {
+        error!(
+              "`application:continueUserActivity:restorationHandler:`: kCSSearchableItemActivityIdentifier has an invalid URL: {identifier}"
+            );
+        return Bool::new(true);
+      }
     }
   };
 
   AppState::open_urls(vec![url]);
   trace!("Completed `application:continueUserActivity:restorationHandler:`");
-  return Bool::new(true);
+  Bool::new(true)
 }
 
 extern "C" fn application_should_handle_reopen(
